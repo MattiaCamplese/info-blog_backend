@@ -76,7 +76,7 @@ const findSchema = querySchema(z.object({
   with: withSchema(relations, "post"),
 }).strict());
 
-postRoute.get('/:id', authMiddleware(), zValidator("query", findSchema), async (c) => {
+postRoute.get('/:id', zValidator("query", findSchema), async (c) => {
   try {
     const { id } = c.req.param();
     const { with: withQuery } = c.req.valid('query')
