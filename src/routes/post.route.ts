@@ -9,11 +9,12 @@ import { DatabaseError } from "pg";
 import { querySchema, withSchema } from "../lib/validations.js";
 import relations from "../db/relations.js";
 import z from "zod";
-import { existsSync, mkdirSync } from "node:fs";
+import { access, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { fileTypeFromBuffer } from "file-type";
 import { type AuthContext, authMiddleware } from "../middleware/auth.middleware.js";
+import { get, put } from "@vercel/blob";
 
 const postRoute = new Hono<AuthContext>().basePath('posts');
 
@@ -243,23 +244,31 @@ postRoute.post('/:id/featured-image', authMiddleware(), zValidator('form', uploa
     if (!queryResult) {
       throw new HTTPException(404, { message: "Articolo non trovato" });
     }
-    if (queryResult.featuredImage && existsSync(queryResult.featuredImage)) {
-      await rm(queryResult.featuredImage);
-    }
-    if (queryResult.userId !== authUser.id && authUser.role !== "admin") {
-      throw new HTTPException(403, { message: "Accesso non autorizzato" });
-    }
 
-    const UPLOAD_DIR = join(process.cwd(), 'uploads');
-    if (!existsSync(UPLOAD_DIR)) {
-      mkdirSync(UPLOAD_DIR, { recursive: true })
+    let filepath = "";
+
+    if (process.env.VERCEL !== "1") {
+      if (queryResult.featuredImage && existsSync(queryResult.featuredImage)) {
+        await rm(queryResult.featuredImage);
+      }
+      if (queryResult.userId !== authUser.id && authUser.role !== "admin") {
+        throw new HTTPException(403, { message: "Accesso non autorizzato" });
+      }
+
+      const UPLOAD_DIR = join(process.cwd(), 'uploads');
+      if (!existsSync(UPLOAD_DIR)) {
+        mkdirSync(UPLOAD_DIR, { recursive: true })
+      }
+
+      const buffer = Buffer.from(await file.arrayBuffer());
+      const filename = `${Date.now()}_${file.name}`;
+      filepath = join(UPLOAD_DIR, filename)
+
+      await writeFile(filepath, buffer);
+    } else {
+      const blob = await put(`${Date.now()}_${file.name}`, file, { access: "private" });
+      filepath = blob.url;
     }
-
-    const buffer = Buffer.from(await file.arrayBuffer());
-    const filename = `${Date.now()}_${file.name}`;
-    const filepath = join(UPLOAD_DIR, filename)
-
-    await writeFile(filepath, buffer);
 
     await db.update(post).set({ featuredImage: filepath }).where(eq(post.id, id))
 
@@ -279,22 +288,36 @@ postRoute.get('/:id/featured-image', async c => {
     const queryResult = await db.query.post.findFirst({
       where: { id }
     });
-    if (!queryResult) {
+
+    if (!queryResult || !queryResult.featuredImage) {
       throw new HTTPException(404, { message: "articolo non trovato" })
     }
 
-    if (!queryResult.featuredImage || !existsSync(queryResult.featuredImage)) {
-      throw new HTTPException(404, { message: "immagine articolo non trovata" })
-    }
-
-    const buffer = await readFile(queryResult.featuredImage);
-    const detect = await fileTypeFromBuffer(buffer)
-
-    return new Response(buffer, {
-      headers: {
-        "Content-type": detect?.mime || "aplication/octet-stream",
+    if (process.env.VERCEL !== "1") {
+      if (!existsSync(queryResult.featuredImage)) {
+        throw new HTTPException(404, { message: "immagine articolo non trovata" })
       }
-    })
+
+      const buffer = await readFile(queryResult.featuredImage);
+      const detect = await fileTypeFromBuffer(buffer)
+
+      return new Response(buffer, {
+        headers: {
+          "Content-type": detect?.mime || "aplication/octet-stream",
+        }
+      })
+    } else {
+      const blobResult = await get(queryResult.featuredImage, { access: "private" });
+
+      if (blobResult?.statusCode !== 200) {
+        throw new HTTPException(404);
+      }
+      return new Response(blobResult.stream, {
+        headers: {
+          "Content-Type": blobResult.blob.contentType,
+        }
+      })
+    }
   } catch (error) {
     if (error instanceof HTTPException) {
       return c.json({ message: error.message }, error.status)
